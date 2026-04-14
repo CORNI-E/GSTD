@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import Dict, List
 from datamodel import Order, TradingState, Symbol, OrderDepth, Listing, Observation
+import random
 
 # =================================================================
 #  1. IMPORTE TON ALGORITHME ICI (OU COLLE LA CLASSE TRADER)
@@ -12,71 +13,84 @@ from trader_round1 import Trader
 
 # (Pour ce test, je pars du principe que ta classe Trader est déjà définie plus haut dans ton script)
 
+## =================================================================
+#  2. MOTEUR DE SIMULATION (MATCHING ENGINE) - VERSION AVANCÉE
 # =================================================================
-#  2. MOTEUR DE SIMULATION (MATCHING ENGINE)
-# =================================================================
+
+
 def simulate_matching(orders: Dict[Symbol, List[Order]], order_depths: Dict[Symbol, OrderDepth], 
                       positions: Dict[Symbol, int], cash: Dict[Symbol, float], limits: Dict[Symbol, int]):
     """
-    Simule l'exécution des ordres en les croisant avec le carnet d'ordres actuel.
+    Version RÉALISTE : Intègre les limites de volume du carnet et un taux d'exécution aléatoire.
     """
+    # Paramètres de réalisme
+    FILL_RATE_MAKER = 0.25  # Seulement 25% de chance d'être exécuté si on est "Maker" (file d'attente)
+    
     for product, product_orders in orders.items():
         if product not in order_depths:
             continue
             
         depth = order_depths[product]
         current_pos = positions.get(product, 0)
-        
+        limit = limits[product]
+
         for order in product_orders:
-            # --- ORDRE D'ACHAT (BUY) ---
+            # --- ACHAT (BUY) ---
             if order.quantity > 0:
-                # On cherche les vendeurs (asks)
-                # Trier par prix croissant (on achète le moins cher d'abord)
-                asks = sorted(depth.sell_orders.items())
-                qty_to_buy = order.quantity
+                # 1. Calcul de la quantité max achetable (respect des limites du challenge)
+                qty_to_buy = min(order.quantity, limit - current_pos)
+                if qty_to_buy <= 0: continue
+
+                # 2. Logique TAKER (On tape dans le carnet adverse)
+                # On regarde combien de volume est RÉELLEMENT dispo au prix de vente (Asks)
+                available_volume = 0
+                execution_price = 0
+                for ask_price, ask_vol in sorted(depth.sell_orders.items()):
+                    if order.price >= ask_price:
+                        available_volume += abs(ask_vol)
+                        execution_price = ask_price # On est exécuté au prix du vendeur
+                        break # Simplification : on prend le meilleur niveau
                 
-                # Vérification de la limite de position
-                max_allowed = limits[product] - current_pos
-                qty_to_buy = min(qty_to_buy, max_allowed)
+                if available_volume > 0:
+                    exec_qty = min(qty_to_buy, available_volume)
+                    current_pos += exec_qty
+                    cash[product] -= exec_qty * execution_price
                 
-                for ask_price, ask_vol in asks:
-                    if qty_to_buy <= 0:
-                        break
-                    if order.price >= ask_price: # Notre prix d'achat croise le prix de vente
-                        vol_available = abs(ask_vol) # Les volumes de vente sont négatifs dans le datamodel
-                        executed_qty = min(qty_to_buy, vol_available)
-                        
-                        current_pos += executed_qty
-                        cash[product] -= executed_qty * ask_price
-                        qty_to_buy -= executed_qty
-                        
-                        # On retire le volume du carnet pour ne pas le réutiliser
-                        depth.sell_orders[ask_price] -= -executed_qty
-            
-            # --- ORDRE DE VENTE (SELL) ---
+                # 3. Logique MAKER (On attend dans le spread)
+                elif order.price >= max(depth.buy_orders.keys()):
+                    # Simulation de la file d'attente : on ne remplit qu'une fraction
+                    if random.random() < FILL_RATE_MAKER:
+                        # On limite aussi par un volume arbitraire "moyen" pour ne pas abuser
+                        exec_qty = min(qty_to_buy, 5) 
+                        current_pos += exec_qty
+                        cash[product] -= exec_qty * order.price
+
+            # --- VENTE (SELL) ---
             elif order.quantity < 0:
-                # On cherche les acheteurs (bids)
-                # Trier par prix décroissant (on vend au plus cher d'abord)
-                bids = sorted(depth.buy_orders.items(), reverse=True)
-                qty_to_sell = abs(order.quantity)
-                
-                # Vérification de la limite de position
-                max_allowed = current_pos + limits[product]
-                qty_to_sell = min(qty_to_sell, max_allowed)
-                
-                for bid_price, bid_vol in bids:
-                    if qty_to_sell <= 0:
+                qty_to_sell = min(abs(order.quantity), current_pos + limit)
+                if qty_to_sell <= 0: continue
+
+                # 1. Logique TAKER (On tape dans les Bids)
+                available_volume = 0
+                execution_price = 0
+                for bid_price, bid_vol in sorted(depth.buy_orders.items(), reverse=True):
+                    if order.price <= bid_price:
+                        available_volume += abs(bid_vol)
+                        execution_price = bid_price
                         break
-                    if order.price <= bid_price: # Notre prix de vente croise le prix d'achat
-                        executed_qty = min(qty_to_sell, bid_vol)
-                        
-                        current_pos -= executed_qty
-                        cash[product] += executed_qty * bid_price
-                        qty_to_sell -= executed_qty
-                        
-                        depth.buy_orders[bid_price] -= executed_qty
-                        
-        # Mise à jour de la position finale après traitement de tous les ordres du produit
+                
+                if available_volume > 0:
+                    exec_qty = min(qty_to_sell, available_volume)
+                    current_pos -= exec_qty
+                    cash[product] += exec_qty * execution_price
+
+                # 2. Logique MAKER
+                elif order.price <= min(depth.sell_orders.keys()):
+                    if random.random() < FILL_RATE_MAKER:
+                        exec_qty = min(qty_to_sell, 5)
+                        current_pos -= exec_qty
+                        cash[product] += exec_qty * order.price
+                    
         positions[product] = current_pos
 
     return positions, cash
